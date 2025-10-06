@@ -46,6 +46,9 @@ func getBadgeLabel(for bundleName: String) -> String? {
 
 class DiscordMonitor: ObservableObject {
     @Published var notificationCount: Int = 0
+    @Published var isRunning: Bool = false
+    @Published var checkInterval: TimeInterval = 2.0
+    
     private var timer: Timer?
     
     init() {
@@ -57,52 +60,41 @@ class DiscordMonitor: ObservableObject {
     }
     
     func startMonitoring() {
-        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: self.checkInterval, repeats: true) { [weak self] _ in
             self?.checkNotifications()
         }
         checkNotifications()
     }
     
-    func checkNotifications() {
-        // Use Launch Services API to get badge directly
-        if let badgeLabel = getBadgeLabel(for: "discord") {
-            if let count = Int(badgeLabel) {
-                if count != notificationCount {
-                    DispatchQueue.main.async {
-                        self.notificationCount = count
-                    }
-                }
-                return
-            }
-        }
-        
-        // Fallback: Check if Discord is running via NSWorkspace
+    func isDiscordRunning() -> Bool {
         let workspace = NSWorkspace.shared
         let discordApps = workspace.runningApplications.filter {
             $0.bundleIdentifier?.contains("discord") == true ||
             $0.localizedName?.lowercased().contains("discord") == true
         }
-        
-        if discordApps.isEmpty && notificationCount != 0 {
-            DispatchQueue.main.async {
-                self.notificationCount = 0
-            }
+    
+        if discordApps.isEmpty {
+            self.isRunning = false
+            return false
         }
+        
+        self.isRunning = true
+        return true
     }
     
-    func openDiscord() {
-        let workspace = NSWorkspace.shared
-        let discordApps = workspace.runningApplications.filter {
-            $0.bundleIdentifier?.contains("discord") == true ||
-            $0.localizedName?.lowercased().contains("discord") == true
+    func checkNotifications() {
+        if !isDiscordRunning() {
+            DispatchQueue.main.async { self.notificationCount = 0 }
+            return
         }
         
-        if let discord = discordApps.first {
-            discord.activate()
-        } else {
-            if let url = URL(string: "discord://") {
-                NSWorkspace.shared.open(url)
-            }
+        if let badgeLabel = getBadgeLabel(for: "discord") {
+            if let fetchedCount = Int(badgeLabel) {
+                if fetchedCount != notificationCount {
+                    DispatchQueue.main.async { self.notificationCount = fetchedCount }
+                }
+                return
+            } else { self.notificationCount = 0}
         }
     }
 }

@@ -12,11 +12,6 @@ struct MenuBarView: View {
     
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Button("Open Discord") {
-                monitor.openDiscord()
-            }
-            .keyboardShortcut("d")
-            
             Button("Refresh") {
                 monitor.checkNotifications()
             }

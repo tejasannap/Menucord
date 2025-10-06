@@ -36,11 +36,12 @@ struct MenucordApp: App {
         MenuBarExtra {
             MenuBarView(monitor: monitor)
         } label: {
-//            if monitor.notificationCount > 0 {
-                Text("💬 \(monitor.notificationCount)")
-//            } else {
-//                Text("💬")
-//            }
+            if monitor.isRunning {
+                Label("Discord", systemImage: "message.badge")
+                Text("\(monitor.notificationCount)")
+            } else {
+                Label("Discord Not Running", systemImage: "exclamationmark.message")
+            }
         }
     }
 }
