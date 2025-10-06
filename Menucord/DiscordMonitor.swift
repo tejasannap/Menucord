@@ -3,53 +3,84 @@ import SwiftUI
 import CoreFoundation
 import ApplicationServices
 
-// MARK: - Launch Services Badge API
-let CoreServiceBundle = CFBundleGetBundleWithIdentifier("com.apple.CoreServices" as CFString)
-
-typealias LSASN = CFTypeRef
-let kLSDefaultSessionID: Int32 = -2
-let badgeLabelKey = "StatusLabel"
-
-typealias LSCopyRunningApplicationArrayType = @convention(c) (Int32) -> [LSASN]
-
-let LSCopyRunningApplicationArray: LSCopyRunningApplicationArrayType = {
-    let untypedFnPtr = CFBundleGetFunctionPointerForName(CoreServiceBundle, "_LSCopyRunningApplicationArray" as CFString)
-    return unsafeBitCast(untypedFnPtr, to: LSCopyRunningApplicationArrayType.self)
-}()
-
-typealias LSCopyApplicationInformationType = @convention(c) (Int32, CFTypeRef, CFString?) -> [CFString: CFDictionary]
-
-let LSCopyApplicationInformation: LSCopyApplicationInformationType = {
-    let untypedFnPtr = CFBundleGetFunctionPointerForName(CoreServiceBundle, "_LSCopyApplicationInformation" as CFString)
-    return unsafeBitCast(untypedFnPtr, to: LSCopyApplicationInformationType.self)
-}()
-
-func getBadgeLabel(for bundleName: String) -> String? {
-    let apps = LSCopyRunningApplicationArray(kLSDefaultSessionID)
+// MARK: Launch Services Wrapper
+final class LaunchServicesWrapper {
+    static let shared = LaunchServicesWrapper()
     
-    for asn in apps {
-        let appInfo = LSCopyApplicationInformation(kLSDefaultSessionID, asn, nil) as [String: Any]
-        
-        guard let appName = appInfo[kCFBundleNameKey as String] as? String,
-              appName.lowercased().contains(bundleName.lowercased()) else {
-            continue
+    private let coreServiceBundle = CFBundleGetBundleWithIdentifier("com.apple.CoreServices" as CFString)
+    private let kLSDefaultSessionID: Int32 = -2
+    private let badgeLabelKey = "StatusLabel"
+    
+    private typealias LSCopyRunningApplicationArrayType = @convention(c) (Int32) -> [CFTypeRef]
+    private typealias LSCopyApplicationInformationType = @convention(c) (Int32, CFTypeRef, CFString?) -> [CFString: CFDictionary]
+    
+    private let copyRunningApplicationArray: LSCopyRunningApplicationArrayType?
+    private let copyApplicationInformation: LSCopyApplicationInformationType?
+    
+    private init() {
+        guard let bundle = coreServiceBundle else {
+            copyRunningApplicationArray = nil
+            copyApplicationInformation = nil
+            return
         }
         
-        if let badgeLabel = appInfo[badgeLabelKey] as? [String: String],
-           let label = badgeLabel["label"] {
-            return label
+        if let ptr = CFBundleGetFunctionPointerForName(bundle, "_LSCopyRunningApplicationArray" as CFString) {
+            copyRunningApplicationArray = unsafeBitCast(ptr, to: LSCopyRunningApplicationArrayType.self)
+        } else {
+            copyRunningApplicationArray = nil
+        }
+        
+        if let ptr = CFBundleGetFunctionPointerForName(bundle, "_LSCopyApplicationInformation" as CFString) {
+            copyApplicationInformation = unsafeBitCast(ptr, to: LSCopyApplicationInformationType.self)
+        } else {
+            copyApplicationInformation = nil
         }
     }
     
-    return nil
+    func getBadgeLabel(for bundleName: String) -> String? {
+        guard let copyRunningApps = copyRunningApplicationArray,
+              let copyAppInfo = copyApplicationInformation else {
+            return nil
+        }
+        
+        let apps = copyRunningApps(kLSDefaultSessionID)
+        
+        for asn in apps {
+            let appInfo = copyAppInfo(kLSDefaultSessionID, asn, nil) as [String: Any]
+            
+            guard let appName = appInfo[kCFBundleNameKey as String] as? String,
+                  appName.lowercased().contains(bundleName.lowercased()) else {
+                continue
+            }
+            
+            if let badgeLabel = appInfo[badgeLabelKey] as? [String: String],
+               let label = badgeLabel["label"] {
+                return label
+            }
+        }
+        
+        return nil
+    }
 }
 
+// MARK: Discord Monitor
 class DiscordMonitor: ObservableObject {
     @Published var notificationCount: Int = 0
     @Published var isRunning: Bool = false
-    @Published var checkInterval: TimeInterval = 2.0
+    
+    var checkInterval: TimeInterval = 2.0 {
+        didSet {
+            if oldValue != checkInterval, timer != nil {
+                restartMonitoring()
+            }
+        }
+    }
     
     private var timer: Timer?
+    private let launchServices = LaunchServicesWrapper.shared
+    private let checkQueue = DispatchQueue(label: "com.discordmonitor.check", qos: .utility)
+    
+    private static let discordIdentifier = "discord"
     
     init() {
         startMonitoring()
@@ -60,42 +91,45 @@ class DiscordMonitor: ObservableObject {
     }
     
     func startMonitoring() {
-        timer = Timer.scheduledTimer(withTimeInterval: self.checkInterval, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: checkInterval, repeats: true) { [weak self] _ in
             self?.checkNotifications()
         }
         checkNotifications()
     }
     
-    func isDiscordRunning() -> Bool {
-        let workspace = NSWorkspace.shared
-        let discordApps = workspace.runningApplications.filter {
-            $0.bundleIdentifier?.contains("discord") == true ||
-            $0.localizedName?.lowercased().contains("discord") == true
-        }
+    private func restartMonitoring() {
+        timer?.invalidate()
+        startMonitoring()
+    }
     
-        if discordApps.isEmpty {
-            self.isRunning = false
-            return false
-        }
-        
-        self.isRunning = true
-        return true
+    func stopMonitoring() {
+        timer?.invalidate()
+        timer = nil
     }
     
     func checkNotifications() {
-        if !isDiscordRunning() {
-            DispatchQueue.main.async { self.notificationCount = 0 }
-            return
-        }
-        
-        if let badgeLabel = getBadgeLabel(for: "discord") {
-            if let fetchedCount = Int(badgeLabel) {
-                if fetchedCount != notificationCount {
-                    DispatchQueue.main.async { self.notificationCount = fetchedCount }
-                }
-                return
-            } else { self.notificationCount = 0}
+        checkQueue.async { [weak self] in
+            guard let self = self else { return }
+            
+            let workspace = NSWorkspace.shared
+            let discordApps = workspace.runningApplications.filter {
+                $0.bundleIdentifier?.lowercased().contains(Self.discordIdentifier) == true ||
+                $0.localizedName?.lowercased().contains(Self.discordIdentifier) == true
+            }
+            
+            let running = !discordApps.isEmpty
+            let count: Int
+            
+            if running, let badgeLabel = self.launchServices.getBadgeLabel(for: Self.discordIdentifier) {
+                count = Int(badgeLabel) ?? 0
+            } else {
+                count = 0
+            }
+            
+            DispatchQueue.main.async {
+                self.isRunning = running
+                self.notificationCount = count
+            }
         }
     }
 }
-
